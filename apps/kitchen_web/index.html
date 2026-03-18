@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Кухня — Ручное назначение</title>
+  <style>
+    body { font-family: sans-serif; max-width: 900px; margin: 1rem auto; padding: 0 1rem; }
+    h1 { margin-bottom: 0.5rem; }
+    .section { margin: 1.5rem 0; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #ccc; padding: 0.5rem; text-align: left; }
+    th { background: #f5f5f5; }
+    button { padding: 0.4rem 0.8rem; margin-right: 0.3rem; cursor: pointer; }
+    button.primary { background: #007bff; color: white; border: none; }
+    select { padding: 0.3rem; }
+    .reason { margin-top: 0.3rem; font-size: 0.9rem; }
+    .error { color: #c00; }
+    .info { color: #066; }
+  </style>
+</head>
+<body>
+  <h1>Веб-приложение кухни</h1>
+  <p class="info">Очередь заказов, готовых к отправке. Ручное назначение блокирует заказ на 30 сек.</p>
+  <div class="section">
+    <label>Кухня (kitchen_id): <input type="text" id="kitchenId" value="" placeholder="UUID кухни" style="width: 280px;" /></label>
+    <button class="primary" onclick="loadOrders()">Обновить очередь</button>
+  </div>
+  <div class="section">
+    <h2>Заказы готовые к отправке (pending)</h2>
+    <div id="orderList"></div>
+  </div>
+  <div class="section">
+    <h2>Доступные курьеры</h2>
+    <div id="courierList"></div>
+  </div>
+  <div id="message"></div>
+  <script>
+    const ORDER_SERVICE = 'http://localhost:8000';
+    const COURIER_SERVICE = 'http://localhost:8001';
+    function msg(t, cls) {
+      const el = document.getElementById('message');
+      el.textContent = t;
+      el.className = cls || '';
+    }
+    async function loadOrders() {
+      const kitchenId = document.getElementById('kitchenId').value.trim();
+      if (!kitchenId) { msg('Введите kitchen_id', 'error'); return; }
+      try {
+        const r = await fetch(`${ORDER_SERVICE}/orders?kitchen_id=${kitchenId}&status=pending`);
+        const data = await r.json();
+        const items = data.items || [];
+        const html = items.length ? '<table><tr><th>Order ID</th><th>Дедлайн</th><th>Действие</th></tr>' +
+          items.map(o => '<tr><td>' + o.order_id + '</td><td>' + (o.promised_delivery_time || '') + '</td><td>' +
+            '<button class="primary" onclick="showAssign(\'' + o.order_id + '\')">Назначить вручную</button></td></tr>').join('') + '</table>' :
+          '<p>Нет заказов в статусе pending.</p>';
+        document.getElementById('orderList').innerHTML = html;
+        await loadCouriers(kitchenId);
+      } catch (e) {
+        msg('Ошибка: ' + e.message, 'error');
+      }
+    }
+    async function loadCouriers(kitchenId) {
+      if (!kitchenId) return;
+      try {
+        const r = await fetch(`${COURIER_SERVICE}/couriers/available/${kitchenId}`);
+        const data = await r.json();
+        const items = data.items || [];
+        window._couriers = items;
+        const html = items.length ? '<table><tr><th>Курьер</th><th>ID</th><th>Статус</th><th>Заказов сегодня</th></tr>' +
+          items.map(c => '<tr><td>' + (c.name || '') + '</td><td>' + c.courier_id + '</td><td>' + c.status + '</td><td>' + (c.orders_delivered_today || 0) + '</td></tr>').join('') + '</table>' :
+          '<p>Нет доступных курьеров.</p>';
+        document.getElementById('courierList').innerHTML = html;
+      } catch (e) {
+        document.getElementById('courierList').innerHTML = '<p class="error">Не удалось загрузить курьеров.</p>';
+      }
+    }
+    function showAssign(orderId) {
+      const couriers = window._couriers || [];
+      if (!couriers.length) { msg('Сначала загрузите курьеров', 'error'); return; }
+      const opts = couriers.map(c => '<option value="' + c.courier_id + '">' + (c.name || c.courier_id) + '</option>').join('');
+      const html = '<p><strong>Заказ ' + orderId + '</strong></p>' +
+        '<p>Курьер: <select id="selCourier">' + opts + '</select></p>' +
+        '<p>Причина (необяз.): <select id="selReason"><option value="">—</option><option value="Курьер уже на месте">Курьер уже на месте</option><option value="Знаю маршрут лучше">Знаю маршрут лучше</option><option value="Клиент попросил">Клиент попросил</option></select></p>' +
+        '<button class="primary" onclick="doManualAssign(\'' + orderId + '\')">Назначить</button> <button onclick="loadOrders()">Отмена</button>';
+      document.getElementById('orderList').innerHTML = document.getElementById('orderList').innerHTML + '<div class="section">' + html + '</div>';
+    }
+    async function doManualAssign(orderId) {
+      const courierId = document.getElementById('selCourier').value;
+      const reason = document.getElementById('selReason').value || null;
+      try {
+        const r = await fetch(`${ORDER_SERVICE}/orders/${orderId}/manual_assign`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ operator_id: 'operator-1', courier_id: courierId, override_reason: reason }),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        msg('Заказ назначен курьеру ' + courierId, 'info');
+        loadOrders();
+      } catch (e) {
+        msg('Ошибка: ' + e.message, 'error');
+      }
+    }
+  </script>
+</body>
+</html>

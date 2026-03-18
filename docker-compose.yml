@@ -1,0 +1,185 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: dispatcher
+      POSTGRES_PASSWORD: dispatcher
+      POSTGRES_DB: dispatcher
+    ports:
+      - "5433:5432"  # 5433 с хоста, чтобы не конфликтовать с локальным PostgreSQL на 5432
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dispatcher"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: dispatcher
+      RABBITMQ_DEFAULT_PASS: dispatcher
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongodb:
+    image: mongo:6
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:23
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    environment:
+      CLICKHOUSE_DB: dispatcher
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "-O", "-", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  order:
+    build:
+      context: .
+      dockerfile: services/order/Dockerfile
+    ports: ["8000:8000"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: dispatcher
+      POSTGRES_PASSWORD: dispatcher
+      POSTGRES_DB: dispatcher
+      RABBITMQ_URL: amqp://dispatcher:dispatcher@rabbitmq:5672/
+      REDIS_URL: redis://redis:6379/0
+      LOG_SERVICE_URL: http://log:8000
+      COURIER_SERVICE_URL: http://courier:8000
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, rabbitmq: { condition: service_healthy } }
+  courier:
+    build:
+      context: .
+      dockerfile: services/courier/Dockerfile
+    ports: ["8001:8000"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: dispatcher
+      POSTGRES_PASSWORD: dispatcher
+      POSTGRES_DB: dispatcher
+      REDIS_URL: redis://redis:6379/0
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy } }
+  config:
+    build:
+      context: .
+      dockerfile: services/config/Dockerfile
+    ports: ["8003:8000"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: dispatcher
+      POSTGRES_PASSWORD: dispatcher
+      POSTGRES_DB: dispatcher
+      REDIS_URL: redis://redis:6379/0
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy } }
+  geo:
+    build:
+      context: .
+      dockerfile: services/geo/Dockerfile
+    ports: ["8002:8000"]
+    environment:
+      MONGODB_URI: mongodb://mongodb:27017
+    depends_on: { mongodb: { condition: service_healthy } }
+  gateway3pl:
+    build:
+      context: .
+      dockerfile: services/gateway3pl/Dockerfile
+    ports: ["8006:8000"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: dispatcher
+      POSTGRES_PASSWORD: dispatcher
+      POSTGRES_DB: dispatcher
+    depends_on: { postgres: { condition: service_healthy } }
+  log:
+    build:
+      context: .
+      dockerfile: services/log/Dockerfile
+    ports: ["8004:8000"]
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+    depends_on: { clickhouse: { condition: service_healthy } }
+  notification:
+    build:
+      context: .
+      dockerfile: services/notification/Dockerfile
+    ports: ["8005:8000"]
+  dispatcher:
+    build:
+      context: .
+      dockerfile: services/dispatcher/Dockerfile
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://dispatcher:dispatcher@rabbitmq:5672/
+      ORDER_SERVICE_URL: http://order:8000
+      COURIER_SERVICE_URL: http://courier:8000
+      GEO_SERVICE_URL: http://geo:8000
+      CONFIG_SERVICE_URL: http://config:8000
+      LOG_SERVICE_URL: http://log:8000
+      NOTIFICATION_SERVICE_URL: http://notification:8000
+      GATEWAY_3PL_URL: http://gateway3pl:8000
+      SHADOW_MODE: "false"
+    depends_on: [order, courier, geo, config, log, notification, gateway3pl, redis, rabbitmq]
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    environment:
+      VITE_ORDER_API: http://order:8000
+      VITE_COURIER_API: http://courier:8000
+      VITE_GEO_API: http://geo:8000
+      VITE_CONFIG_API: http://config:8000
+      VITE_LOG_API: http://log:8000
+      VITE_NOTIFICATION_API: http://notification:8000
+      VITE_GATEWAY3PL_API: http://gateway3pl:8000
+    depends_on:
+      - order
+      - courier
+      - config
+      - geo
+      - log
+      - notification
+      - gateway3pl
+
+volumes:
+  postgres_data:
+  mongo_data:
+  clickhouse_data:

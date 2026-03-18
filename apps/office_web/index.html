@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Офис — Админка диспатчера</title>
+  <style>
+    body { font-family: sans-serif; max-width: 1100px; margin: 1rem auto; padding: 0 1rem; }
+    nav { margin-bottom: 1rem; }
+    nav a { margin-right: 1rem; }
+    .section { margin: 1.5rem 0; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #ccc; padding: 0.5rem; text-align: left; }
+    th { background: #f5f5f5; }
+    button { padding: 0.4rem 0.8rem; cursor: pointer; }
+    .card { border: 1px solid #ddd; padding: 1rem; margin: 0.5rem 0; }
+    .error { color: #c00; }
+    .info { color: #066; }
+    pre { background: #f8f8f8; padding: 0.5rem; overflow: auto; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Веб-приложение офиса (менеджер / админ)</h1>
+  <nav>
+    <a href="#" onclick="showTab('timeline')">Таймлайн решений</a>
+    <a href="#" onclick="showTab('analytics')">Override Analytics</a>
+    <a href="#" onclick="showTab('configs')">Конфигурации алгоритмов</a>
+  </nav>
+  <div id="timeline" class="tab section">
+    <h2>Decision Timeline</h2>
+    <p><label>Источник: <select id="tlSource"><option value="">Все</option><option value="dispatcher_auto">Авто</option><option value="manual_override">Ручной</option></select></label>
+    <button onclick="loadDecisions()">Загрузить</button></p>
+    <div id="decisionList"></div>
+    <div id="decisionDetail" class="card" style="display:none;">
+      <h3>Детали решения</h3>
+      <div id="decisionDetailBody"></div>
+    </div>
+  </div>
+  <div id="analytics" class="tab section" style="display:none;">
+    <h2>Override Analytics</h2>
+    <button onclick="loadOverrideRate()">Обновить</button>
+    <div id="overrideRate"></div>
+  </div>
+  <div id="configs" class="tab section" style="display:none;">
+    <h2>Конфигурации алгоритмов</h2>
+    <button onclick="loadConfigs()">Загрузить</button>
+    <div id="configList"></div>
+  </div>
+  <div id="message"></div>
+  <script>
+    const LOG_SERVICE = 'http://localhost:8004';
+    const CONFIG_SERVICE = 'http://localhost:8003';
+    function msg(t, cls) {
+      const el = document.getElementById('message');
+      el.textContent = t;
+      el.className = cls || '';
+    }
+    function showTab(name) {
+      document.querySelectorAll('.tab').forEach(el => el.style.display = 'none');
+      document.getElementById(name).style.display = 'block';
+    }
+    async function loadDecisions() {
+      const source = document.getElementById('tlSource').value;
+      let url = LOG_SERVICE + '/decisions?limit=50';
+      if (source) url += '&assignment_source=' + source;
+      try {
+        const r = await fetch(url);
+        const data = await r.json();
+        const items = data.items || [];
+        const html = items.length ? '<table><tr><th>Время</th><th>Заказ</th><th>Назначен</th><th>Тип</th><th>Score</th><th></th></tr>' +
+          items.map(d => '<tr><td>' + (d.timestamp || '') + '</td><td>' + d.order_id + '</td><td>' + d.assigned_to + '</td><td>' + (d.assignment_source || '') + '</td><td>' + (d.winner_score != null ? d.winner_score : '') + '</td><td><button onclick="showDecision(\'' + d.decision_id + '\')">Детали</button></td></tr>').join('') + '</table>' :
+          '<p>Нет решений.</p>';
+        document.getElementById('decisionList').innerHTML = html;
+      } catch (e) {
+        document.getElementById('decisionList').innerHTML = '<p class="error">Ошибка: ' + e.message + '</p>';
+      }
+    }
+    async function showDecision(decisionId) {
+      try {
+        const r = await fetch(LOG_SERVICE + '/decisions/' + decisionId);
+        const d = await r.json();
+        let body = '<p><strong>Причина:</strong> ' + (d.reason_summary || '') + '</p>';
+        body += '<p><strong>Версия алгоритма:</strong> ' + (d.algorithm_version || '') + '</p>';
+        if (d.scores && Object.keys(d.scores).length) {
+          body += '<p><strong>Scores:</strong></p><pre>' + JSON.stringify(d.scores, null, 2) + '</pre>';
+        }
+        if (d.factors && d.factors.length) {
+          body += '<p><strong>Факторы:</strong></p><pre>' + JSON.stringify(d.factors, null, 2) + '</pre>';
+        }
+        if (d.context_snapshot && Object.keys(d.context_snapshot).length) {
+          body += '<p><strong>Контекст:</strong></p><pre>' + JSON.stringify(d.context_snapshot, null, 2) + '</pre>';
+        }
+        document.getElementById('decisionDetailBody').innerHTML = body;
+        document.getElementById('decisionDetail').style.display = 'block';
+      } catch (e) {
+        msg('Ошибка: ' + e.message, 'error');
+      }
+    }
+    async function loadOverrideRate() {
+      try {
+        const r = await fetch(LOG_SERVICE + '/decisions/analytics/override_rate');
+        const data = await r.json();
+        document.getElementById('overrideRate').innerHTML =
+          '<p>Override rate: <strong>' + (data.override_rate != null ? (data.override_rate * 100).toFixed(1) : 0) + '%</strong> (' + (data.overrides || 0) + ' / ' + (data.total || 0) + ')' +
+          (data.alert ? ' <span class="error">Алерт: > 15%</span>' : '') + '</p>';
+      } catch (e) {
+        document.getElementById('overrideRate').innerHTML = '<p class="error">Ошибка: ' + e.message + '</p>';
+      }
+    }
+    async function loadConfigs() {
+      try {
+        const r = await fetch(CONFIG_SERVICE + '/configs');
+        const data = await r.json();
+        const items = data.items || [];
+        const html = items.length ? '<table><tr><th>Версия</th><th>Название</th><th>Активна</th><th>Кухни</th></tr>' +
+          items.map(c => '<tr><td>' + c.version + '</td><td>' + c.name + '</td><td>' + (c.is_active ? 'Да' : 'Нет') + '</td><td>' + (c.kitchen_ids || []).length + '</td></tr>').join('') + '</table>' :
+          '<p>Нет конфигураций.</p>';
+        document.getElementById('configList').innerHTML = html;
+      } catch (e) {
+        document.getElementById('configList').innerHTML = '<p class="error">Ошибка: ' + e.message + '</p>';
+      }
+    }
+  </script>
+</body>
+</html>
