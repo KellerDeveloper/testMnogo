@@ -1,0 +1,20 @@
+# Локальные/секретные файлы
+.env
+.env.*
+
+# iOS/Xcode артефакты (их обычно не хочется коммитить)
+**/xcuserdata/
+**/*.xcuserstate
+**/DerivedData/
+
+# IDE
+.idea/
+.cursor/
+
+# Node.js
+frontend/node_modules/
+frontend/dist/
+
+# Локальная “документация для себя”, которую мы не коммитим
+docs/HOW_IT_WORKS_DETAILED_LOCAL.md
+

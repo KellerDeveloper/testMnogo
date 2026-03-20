@@ -11,6 +11,12 @@ struct Order: Codable {
     let status: String
     let promisedDeliveryTime: String?
     let assignedCourierId: String?
+    let customerLocation: CustomerLocation?
+
+    struct CustomerLocation: Codable, Equatable {
+        let lat: Double
+        let lon: Double
+    }
 
     enum CodingKeys: String, CodingKey {
         case orderId = "order_id"
@@ -18,5 +24,6 @@ struct Order: Codable {
         case status
         case promisedDeliveryTime = "promised_delivery_time"
         case assignedCourierId = "assigned_courier_id"
+        case customerLocation = "customer_location"
     }
 }

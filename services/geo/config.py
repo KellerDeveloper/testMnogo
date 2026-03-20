@@ -12,8 +12,11 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     mongodb_uri: str = "mongodb://localhost:27017"
     mongodb_db: str = "dispatcher"
-    max_speed_kmh: float = 60.0
-    gap_penalty_minutes: int = 2
+    # Для “московских реалий” мы делаем антифрод более терпимым к редким точкам:
+    # при временных проблемах с навигацией/связью координаты могут прийти с задержкой,
+    # а вычисленная скорость/разрыв времени не всегда отражают реальное перемещение.
+    max_speed_kmh: float = 90.0
+    gap_penalty_minutes: int = 5
     trust_recovery_rate: float = 0.05
     trust_penalty_rate: float = 0.15
 

@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     rabbitmq_url: str = "amqp://dispatcher:dispatcher@localhost:5672/"
     courier_exchange: str = "courier_events"
     cache_available_couriers_ttl: int = 60
+    # Если задан — при приёме пачки точек каждая точка дублируется в geo-сервис (Mongo, антифрод).
+    geo_service_url: str | None = None
 
     @property
     def database_url(self) -> str:

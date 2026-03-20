@@ -4,7 +4,6 @@
 //
 
 import CoreLocation
-import MapKit
 import SwiftUI
 
 struct OrdersView: View {
@@ -14,12 +13,18 @@ struct OrdersView: View {
     @State private var orders: [String: Order] = [:]
     @State private var isLoading = false
     @State private var errorMessage: String?
+    @State private var locationSyncError: String?
     @State private var deliveryMinutesPerOrder: [String: String] = [:]
     @State private var actionLoading: Set<String> = []
     @StateObject private var locationManager = LocationManager()
+    @StateObject private var networkMonitor = NetworkStatusMonitor()
+    @ObservedObject private var locationQueueStore = LocationQueueStore.shared
     @State private var showQRScanner = false
+    @Environment(\.openURL) private var openURL
 
     private let api = APIClient()
+    /// Размер батча на один запрос (типичный диапазон продуктов 20–50).
+    private let locationBatchChunkSize = 40
 
     var body: some View {
         ScrollView {
@@ -31,20 +36,30 @@ struct OrdersView: View {
                         .padding(.horizontal)
                 }
 
+                if let locErr = locationSyncError {
+                    Text(locErr)
+                        .foregroundStyle(.red)
+                        .font(.caption)
+                        .padding(.horizontal)
+                }
+
                 if isLoading && courier == nil {
                     ProgressView("Загрузка…")
                         .frame(maxWidth: .infinity)
                         .padding()
                 } else if let c = courier {
                     courierCard(c)
-                    locationBlock(courierId: courierId)
+                    locationBlock(courierId: courierId, courier: c)
                     currentOrdersSection(courier: c)
                 }
             }
             .padding()
         }
         .navigationTitle("Мои заказы")
-        .refreshable { await loadCourier() }
+        .refreshable {
+            await loadCourier()
+            await flushLocationQueueIfPossible()
+        }
         .task {
             await loadCourier()
             while !Task.isCancelled {
@@ -69,6 +84,16 @@ struct OrdersView: View {
             Text("Заказов за смену: \(c.ordersDeliveredToday) · Сейчас: \(c.currentOrders.count)/\(c.maxBatchSize)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            HStack(spacing: 12) {
+                Label(networkMonitor.status.rawValue, systemImage: networkStatusIcon)
+                    .font(.caption2)
+                    .foregroundStyle(networkStatusColor)
+                Text(gpsQualityShortHint)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
             HStack(spacing: 10) {
                 Button("Начать смену") {
                     Task { await startShift() }
@@ -121,23 +146,48 @@ struct OrdersView: View {
         .background(Color(.secondarySystemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .sheet(isPresented: $showQRScanner) {
-            QRScannerView { token in
-                Task {
-                    do {
-                        try await api.confirmArrival(courierId: courierId, token: token)
-                        await loadCourier()
-                        await MainActor.run { showQRScanner = false }
-                    } catch {
-                        await MainActor.run { errorMessage = messageFor(error) }
+            QRScannerView(
+                onCodeScanned: { token in
+                    Task {
+                        do {
+                            try await api.confirmArrival(courierId: courierId, token: token)
+                            await loadCourier()
+                            await MainActor.run { showQRScanner = false }
+                        } catch {
+                            await MainActor.run { errorMessage = messageFor(error) }
+                        }
                     }
-                }
-            }
+                },
+                onClose: { showQRScanner = false }
+            )
+            .presentationDetents([.medium])
+            .presentationDragIndicator(.visible)
         }
     }
 
-    private func locationBlock(courierId: String) -> some View {
+    private func locationBlock(courierId: String, courier: Courier) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Геолокация").font(.subheadline.weight(.medium))
+
+            Text(locationTrackingHint)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Text(gpsQualityDetailHint)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            if networkMonitor.status == .offline {
+                Text("Сеть недоступна: координаты копятся в локальном журнале и уйдут батчами при появлении связи.")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+
+            if locationQueueStore.pendingCount > 0 {
+                Text("В очереди на отправку: \(locationQueueStore.pendingCount) точек (офлайн-first)")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
 
             if locationManager.authorizationStatus == .denied {
                 Text("Доступ к геолокации отключён. Включите в Настройках → Конфиденциальность.")
@@ -145,10 +195,14 @@ struct OrdersView: View {
                     .foregroundStyle(.orange)
             }
 
-            if let region = mapRegion {
-                Map(initialPosition: .region(region), interactionModes: [.zoom])
-                    .frame(height: 160)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            if let courierCoord = locationManager.lastLocation?.coordinate {
+                YandexMapView(
+                    courierCoordinate: courierCoord,
+                    orderMarkers: orderMarkersForMap(courier: courier),
+                    zoom: 14
+                )
+                .frame(height: 160)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
             }
         }
         .padding()
@@ -156,37 +210,188 @@ struct OrdersView: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .onAppear {
             locationManager.requestPermissionIfNeeded()
-            locationManager.startUpdatingLocation()
+            locationManager.onSignificantLocation = { loc in
+                Task { await enqueueAndTryFlush(loc: loc, modeTag: "significant") }
+            }
+            syncCourierTrackingMode(courier: courier)
+            Task { await flushLocationQueueIfPossible() }
         }
-        .onDisappear { locationManager.stopUpdatingLocation() }
+        .onDisappear {
+            locationManager.onSignificantLocation = nil
+            locationManager.stopAllTracking()
+        }
+        .onChange(of: courier.status) { _, _ in
+            syncCourierTrackingMode(courier: courier)
+        }
+        .onChange(of: courier.currentOrders.count) { _, _ in
+            syncCourierTrackingMode(courier: courier)
+        }
+        .onChange(of: networkMonitor.status) { _, newStatus in
+            guard newStatus != .offline else { return }
+            locationSyncError = nil
+            Task { await flushLocationQueueIfPossible() }
+        }
         .task {
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(10))
-                await sendLocationInBackground()
+                try? await Task.sleep(for: .seconds(12))
+                guard !Task.isCancelled else { break }
+                guard locationManager.courierTrackingMode == .activeDelivery else { continue }
+                guard locationManager.authorizationStatus == .authorizedWhenInUse
+                    || locationManager.authorizationStatus == .authorizedAlways else { continue }
+                do {
+                    let loc = try await locationManager.requestCurrentLocation()
+                    await enqueueAndTryFlush(loc: loc, modeTag: "active")
+                } catch {
+                    // тихо — сеть/GPS
+                }
             }
         }
     }
 
-    private var mapRegion: MKCoordinateRegion? {
-        guard let loc = locationManager.lastLocation else { return nil }
-        return MKCoordinateRegion(
-            center: loc.coordinate,
-            span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
+    private var locationTrackingHint: String {
+        switch locationManager.courierTrackingMode {
+        case .off:
+            return "Трекинг выключен (смена не начата / офлайн)."
+        case .significantOnly:
+            return "Экономия батареи: только крупные перемещения (significant location). Точное GPS — при активном заказе."
+        case .activeDelivery:
+            return "Активный заказ: точная геолокация и отправка каждые ~12 с."
+        }
+    }
+
+    private var networkStatusIcon: String {
+        switch networkMonitor.status {
+        case .online: return "wifi"
+        case .constrained: return "exclamationmark.triangle.fill"
+        case .offline: return "wifi.slash"
+        }
+    }
+
+    private var networkStatusColor: Color {
+        switch networkMonitor.status {
+        case .online: return .secondary
+        case .constrained: return .orange
+        case .offline: return .red
+        }
+    }
+
+    /// Короткая подсказка по качеству GPS для строки под статусом смены.
+    private var gpsQualityShortHint: String {
+        guard let loc = locationManager.lastLocation else {
+            return "GPS: нет точки"
+        }
+        let acc = loc.horizontalAccuracy
+        if acc < 0 {
+            return "GPS: нет точности (помехи?)"
+        }
+        if acc <= 35 {
+            return String(format: "GPS: ок ±%.0f м", acc)
+        }
+        if acc <= 120 {
+            return String(format: "GPS: слабее ±%.0f м", acc)
+        }
+        return String(format: "GPS: грубо ±%.0f м", acc)
+    }
+
+    /// Развёрнуто в блоке геолокации.
+    private var gpsQualityDetailHint: String {
+        guard let loc = locationManager.lastLocation else {
+            return "Нет зафиксированной точки. Разрешите геолокацию и подождите."
+        }
+        let acc = loc.horizontalAccuracy
+        if acc < 0 {
+            return "Точность неизвестна — типично при глушении GNSS или внутри здания; координаты могут «прыгать»."
+        }
+        if acc <= 35 {
+            return String(format: "Сигнал хороший: горизонтальная точность ~±%.0f м (GNSS).", acc)
+        }
+        if acc <= 120 {
+            return String(
+                format: "Точность снижена (~±%.0f м): возможен Wi‑Fi/LBS или помехи; на карте для клиента это может быть «приблизительно».",
+                acc
+            )
+        }
+        return String(
+            format: "Грубая точка (~±%.0f м): опирайтесь на здравый смысл и маршрут; трек всё равно сохранится локально.",
+            acc
         )
     }
 
-    private func sendLocationInBackground() async {
-        guard locationManager.authorizationStatus == .authorizedWhenInUse || locationManager.authorizationStatus == .authorizedAlways else { return }
-        do {
-            let loc = try await locationManager.requestCurrentLocation()
-            try await api.updateLocation(courierId: courierId, lat: loc.coordinate.latitude, lon: loc.coordinate.longitude)
-        } catch {
-            // тихо игнорируем в фоне
+    private func syncCourierTrackingMode(courier: Courier) {
+        if courier.status == "offline" {
+            locationManager.setCourierTrackingMode(.off)
+        } else if !courier.currentOrders.isEmpty {
+            locationManager.setCourierTrackingMode(.activeDelivery)
+        } else {
+            locationManager.setCourierTrackingMode(.significantOnly)
+        }
+    }
+
+    private func orderMarkersForMap(courier: Courier) -> [YandexMapMarker] {
+        courier.currentOrders.compactMap { orderId in
+            guard let o = orders[orderId],
+                  let loc = o.customerLocation else { return nil }
+            return YandexMapMarker(id: orderId, lat: loc.lat, lon: loc.lon)
+        }
+    }
+
+    private func routeFromCoordinate(for courier: Courier) -> CLLocationCoordinate2D? {
+        if let loc = locationManager.lastLocation {
+            return loc.coordinate
+        }
+        if let cl = courier.currentLocation,
+           let lat = cl.lat,
+           let lon = cl.lon {
+            return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+        }
+        return nil
+    }
+
+    private func openYandexRoute(from: CLLocationCoordinate2D, to: CLLocationCoordinate2D) {
+        var comps = URLComponents(string: "https://yandex.ru/maps/")!
+        comps.queryItems = [
+            URLQueryItem(
+                name: "rtext",
+                value: "\(from.latitude),\(from.longitude)~\(to.latitude),\(to.longitude)"
+            ),
+            URLQueryItem(name: "rtt", value: "auto")
+        ]
+        if let url = comps.url {
+            openURL(url)
+        }
+    }
+
+    private func enqueueAndTryFlush(loc: CLLocation, modeTag: String) async {
+        LocationQueueStore.shared.append(location: loc, modeTag: modeTag)
+        await flushLocationQueueIfPossible()
+    }
+
+    private func flushLocationQueueIfPossible() async {
+        // Важно: не пытаемся слать, пока не получили courier-карточку
+        // (иначе возможен 404 "courier not found", если id/смена еще не синхронизированы).
+        guard courier != nil else { return }
+        guard networkMonitor.status != .offline else { return }
+        let activeCourierId = courier?.courierId ?? courierId
+        while true {
+            guard networkMonitor.status != .offline else { break }
+            let snap = LocationQueueStore.shared.snapshotForUpload()
+            guard !snap.isEmpty else { break }
+            let chunk = Array(snap.prefix(locationBatchChunkSize))
+            do {
+                try await api.sendLocationBatch(courierId: activeCourierId, points: chunk)
+                LocationQueueStore.shared.removeFirst(chunk.count)
+            } catch {
+                await MainActor.run {
+                    locationSyncError = "Не удалось отправить точки геолокации (courierId=\(activeCourierId)): \(error.localizedDescription)"
+                }
+                break
+            }
         }
     }
 
     private func currentOrdersSection(courier: Courier) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let fromCoord = routeFromCoordinate(for: courier)
+        return VStack(alignment: .leading, spacing: 8) {
             Text("Текущие заказы (\(courier.currentOrders.count))").font(.subheadline.weight(.medium))
             if courier.currentOrders.isEmpty {
                 Text("Нет активных заказов. Новые появятся после назначения с кухни или диспетчера.")
@@ -195,13 +400,13 @@ struct OrdersView: View {
                     .padding(.vertical, 8)
             } else {
                 ForEach(courier.currentOrders, id: \.self) { orderId in
-                    orderRow(orderId: orderId, courierId: courierId)
+                    orderRow(orderId: orderId, courierId: courierId, fromCoord: fromCoord)
                 }
             }
         }
     }
 
-    private func orderRow(orderId: String, courierId: String) -> some View {
+    private func orderRow(orderId: String, courierId: String, fromCoord: CLLocationCoordinate2D?) -> some View {
         let order = orders[orderId]
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
@@ -228,6 +433,16 @@ struct OrdersView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+                if let fromCoord, let loc = o.customerLocation {
+                    Button("Построить маршрут") {
+                        let to = CLLocationCoordinate2D(latitude: loc.lat, longitude: loc.lon)
+                        openYandexRoute(from: fromCoord, to: to)
+                    }
+                    .disabled(actionLoading.contains("route_\(orderId)"))
+                    .buttonStyle(.bordered)
+                }
+
                 if o.status == "assigned" {
                     Button("Забрал") {
                         Task { await pickUp(orderId: orderId) }
@@ -293,6 +508,7 @@ struct OrdersView: View {
         do {
             let c = try await api.getCourier(id: courierId)
             await MainActor.run { courier = c; isLoading = false }
+            await flushLocationQueueIfPossible()
             for id in c.currentOrders where orders[id] == nil {
                 await fetchOrder(id)
             }
@@ -319,6 +535,9 @@ struct OrdersView: View {
         do {
             try await api.startShift(courierId: courierId)
             await loadCourier()
+            await MainActor.run {
+                locationManager.requestAlwaysIfNeededForBackgroundTracking()
+            }
         } catch {
             await MainActor.run { errorMessage = messageFor(error) }
         }

@@ -2,6 +2,9 @@
 //  LocationManager.swift
 //  testMnogoIOS
 //
+//  Режимы как в foodtech: significant location без активного заказа,
+//  высокая точность только пока есть текущие заказы (экономия батареи).
+//
 
 import Combine
 import CoreLocation
@@ -9,9 +12,21 @@ import Foundation
 
 @MainActor
 final class LocationManager: NSObject, ObservableObject {
+    enum CourierTrackingMode: Equatable {
+        case off
+        /// Крупные перемещения (~смена соты), минимальный расход батареи
+        case significantOnly
+        /// Активная доставка — точное GPS
+        case activeDelivery
+    }
+
     @Published var lastLocation: CLLocation?
     @Published var authorizationStatus: CLAuthorizationStatus = .notDetermined
+    @Published private(set) var courierTrackingMode: CourierTrackingMode = .off
     @Published var errorMessage: String?
+
+    /// Вызывается при новой точке в режиме significantOnly (для офлайн-очереди).
+    var onSignificantLocation: ((CLLocation) -> Void)?
 
     private let manager = CLLocationManager()
     private var continuation: CheckedContinuation<CLLocation, Error>?
@@ -19,14 +34,23 @@ final class LocationManager: NSObject, ObservableObject {
     override init() {
         super.init()
         manager.delegate = self
-        manager.desiredAccuracy = kCLLocationAccuracyBest
-        manager.distanceFilter = 10
+        manager.pausesLocationUpdatesAutomatically = true
         authorizationStatus = manager.authorizationStatus
     }
 
     func requestPermissionIfNeeded() {
         guard authorizationStatus == .notDetermined else { return }
         manager.requestWhenInUseAuthorization()
+    }
+
+    /// Для фоновых significant updates нужен «Всегда» + UIBackgroundModes location.
+    func requestAlwaysIfNeededForBackgroundTracking() {
+        switch manager.authorizationStatus {
+        case .authorizedWhenInUse:
+            manager.requestAlwaysAuthorization()
+        default:
+            break
+        }
     }
 
     /// Запросить текущую геопозицию (одноразово). Сначала запрашивает разрешение при необходимости.
@@ -41,13 +65,42 @@ final class LocationManager: NSObject, ObservableObject {
         }
     }
 
-    func startUpdatingLocation() {
-        requestPermissionIfNeeded()
-        manager.startUpdatingLocation()
+    func setCourierTrackingMode(_ mode: CourierTrackingMode) {
+        guard mode != courierTrackingMode else {
+            refreshBackgroundUpdatesFlag()
+            return
+        }
+        courierTrackingMode = mode
+
+        switch mode {
+        case .off:
+            manager.stopUpdatingLocation()
+            manager.stopMonitoringSignificantLocationChanges()
+            manager.allowsBackgroundLocationUpdates = false
+        case .significantOnly:
+            manager.stopUpdatingLocation()
+            manager.desiredAccuracy = kCLLocationAccuracyKilometer
+            manager.distanceFilter = kCLDistanceFilterNone
+            manager.activityType = .otherNavigation
+            manager.startMonitoringSignificantLocationChanges()
+            refreshBackgroundUpdatesFlag()
+        case .activeDelivery:
+            manager.stopMonitoringSignificantLocationChanges()
+            manager.desiredAccuracy = kCLLocationAccuracyBest
+            manager.distanceFilter = 35
+            manager.activityType = .automotiveNavigation
+            manager.startUpdatingLocation()
+            refreshBackgroundUpdatesFlag()
+        }
     }
 
-    func stopUpdatingLocation() {
-        manager.stopUpdatingLocation()
+    private func refreshBackgroundUpdatesFlag() {
+        let always = manager.authorizationStatus == .authorizedAlways
+        manager.allowsBackgroundLocationUpdates = always && courierTrackingMode != .off
+    }
+
+    func stopAllTracking() {
+        setCourierTrackingMode(.off)
     }
 }
 
@@ -56,6 +109,9 @@ extension LocationManager: CLLocationManagerDelegate {
         guard let loc = locations.last else { return }
         Task { @MainActor in
             lastLocation = loc
+            if courierTrackingMode == .significantOnly {
+                onSignificantLocation?(loc)
+            }
             if let cont = continuation {
                 continuation = nil
                 cont.resume(returning: loc)
@@ -76,6 +132,7 @@ extension LocationManager: CLLocationManagerDelegate {
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         Task { @MainActor in
             authorizationStatus = manager.authorizationStatus
+            refreshBackgroundUpdatesFlag()
         }
     }
 }

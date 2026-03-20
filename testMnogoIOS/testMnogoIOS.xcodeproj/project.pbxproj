@@ -402,9 +402,11 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.business";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Камера используется для сканирования QR-кодов при возврате курьера на кухню.";
+				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "Фоновые крупные перемещения и точная геолокация во время доставки — чтобы кухня и диспетчер видели курьера при выключенном экране.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Отправка текущей геолокации на сервер для отображения на карте доставки";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UIBackgroundModes = location;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -437,9 +439,11 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.business";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Камера используется для сканирования QR-кодов при возврате курьера на кухню.";
+				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "Фоновые крупные перемещения и точная геолокация во время доставки — чтобы кухня и диспетчер видели курьера при выключенном экране.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Отправка текущей геолокации на сервер для отображения на карте доставки";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UIBackgroundModes = location;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";

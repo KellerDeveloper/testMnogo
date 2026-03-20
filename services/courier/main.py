@@ -1,8 +1,10 @@
 import json
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
+import httpx
 from fastapi import FastAPI, HTTPException, Path, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
@@ -15,7 +17,10 @@ from models_db import Base, CourierModel, _generate_login
 from cache import get_cached_available_couriers, set_cached_available_couriers, invalidate_available_couriers
 from websocket_manager import courier_ws_manager
 
+logger = logging.getLogger(__name__)
+
 COURIER_LOGIN_LEN = 6
+LOCATION_BATCH_MAX_POINTS = 500
 
 # Здесь живёт “сервис курьеров” — состояние смены, текущие заказы, гео и всё,
 # что нужно кухне/офису/курьерскому приложению для синхронизации.
@@ -90,6 +95,18 @@ class CourierUpdateStatusBody(BaseModel):
 class CourierUpdateLocationBody(BaseModel):
     lat: float
     lon: float
+
+
+class CourierLocationBatchPoint(BaseModel):
+    lat: float
+    lon: float
+    timestamp: datetime | None = None
+    source: str = "gps"
+    accuracy_m: float | None = None
+
+
+class CourierLocationBatchBody(BaseModel):
+    points: list[CourierLocationBatchPoint]
 
 
 class CourierAddOrderBody(BaseModel):
@@ -253,6 +270,65 @@ async def update_location(courier_id: str = Path(..., pattern=r"^\d{6}$"), body:
         if not row:
             raise HTTPException(status_code=404, detail="Courier not found")
         row.current_location = {"lat": body.lat, "lon": body.lon}
+        await session.commit()
+        await courier_ws_manager.broadcast_courier_changed(row.courier_id, str(row.kitchen_id))
+        return _courier_to_dict(row)
+
+
+async def _forward_points_to_geo(courier_id: str, points: list[CourierLocationBatchPoint]) -> None:
+    base = (settings.geo_service_url or "").strip().rstrip("/")
+    if not base:
+        return
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for p in points:
+            payload: dict = {
+                "courier_id": courier_id,
+                "lat": p.lat,
+                "lon": p.lon,
+                "source": p.source,
+            }
+            if p.timestamp is not None:
+                payload["timestamp"] = p.timestamp.isoformat()
+            if p.accuracy_m is not None:
+                payload["accuracy_m"] = p.accuracy_m
+            try:
+                r = await client.post(f"{base}/location", json=payload)
+                r.raise_for_status()
+            except Exception as e:
+                logger.warning("geo /location forward failed for %s: %s", courier_id, e)
+
+
+@app.post("/couriers/{courier_id}/location/batch")
+async def update_location_batch(
+    courier_id: str = Path(..., pattern=r"^\d{6}$"), body: CourierLocationBatchBody = ...
+):
+    """
+    Очередь офлайн-точек с телефона: принимаем пачку, сортируем по времени,
+    прокидываем в geo по порядку (если настроен GEO_SERVICE_URL), в БД курьера — последняя точка.
+    """
+    if len(body.points) > LOCATION_BATCH_MAX_POINTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many points (max {LOCATION_BATCH_MAX_POINTS})",
+        )
+    if not body.points:
+        raise HTTPException(status_code=400, detail="points must not be empty")
+
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    ordered = sorted(
+        body.points,
+        key=lambda p: p.timestamp if p.timestamp is not None else epoch,
+    )
+
+    await _forward_points_to_geo(courier_id, ordered)
+
+    last = ordered[-1]
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(CourierModel).where(CourierModel.courier_id == courier_id))
+        row = result.scalars().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Courier not found")
+        row.current_location = {"lat": last.lat, "lon": last.lon}
         await session.commit()
         await courier_ws_manager.broadcast_courier_changed(row.courier_id, str(row.kitchen_id))
         return _courier_to_dict(row)

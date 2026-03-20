@@ -94,7 +94,11 @@ services:
       POSTGRES_PASSWORD: dispatcher
       POSTGRES_DB: dispatcher
       REDIS_URL: redis://redis:6379/0
-    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy } }
+      GEO_SERVICE_URL: http://geo:8000
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      geo: { condition: service_started }
   config:
     build:
       context: .

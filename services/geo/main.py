@@ -32,6 +32,8 @@ class LocationUpdateBody(BaseModel):
     lon: float
     source: str = "gps"
     timestamp: datetime | None = None
+    # Горизонтальная точность с клиента (метры), если есть — для аналитики и UI «приблизительно».
+    accuracy_m: float | None = None
 
 
 class LocationResponse(BaseModel):
@@ -74,7 +76,7 @@ async def report_location(body: LocationUpdateBody):
         {"$set": {"courier_id": body.courier_id, "score": new_trust, "updated_at": ts}},
         upsert=True,
     )
-    coll.insert_one({
+    doc = {
         "courier_id": body.courier_id,
         "lat": body.lat,
         "lon": body.lon,
@@ -83,7 +85,10 @@ async def report_location(body: LocationUpdateBody):
         "speed_kmh": speed_kmh,
         "accepted": speed_ok,
         "verified": speed_ok,
-    })
+    }
+    if body.accuracy_m is not None:
+        doc["accuracy_m"] = body.accuracy_m
+    coll.insert_one(doc)
     return {
         "accepted": speed_ok,
         "geo_trust_score": new_trust,
@@ -94,11 +99,21 @@ async def report_location(body: LocationUpdateBody):
 @app.get("/location/{courier_id}")
 async def get_verified_location(courier_id: str):
     db = get_db()
+    # В “московских реалиях” навигация/интернет могут лагать/пропадать,
+    # поэтому точки иногда приходят редко и/или с большими разрывами.
+    # Чтобы диспатчер не оставался без координат полностью, при отсутствии
+    # accepted-позиций отдаём последнюю известную точку (verified=false).
     loc = db["locations"].find_one(
         {"courier_id": courier_id, "accepted": True},
         sort=[("timestamp", -1)],
         projection={"lat": 1, "lon": 1, "timestamp": 1},
     )
+    if not loc:
+        loc = db["locations"].find_one(
+            {"courier_id": courier_id},
+            sort=[("timestamp", -1)],
+            projection={"lat": 1, "lon": 1, "timestamp": 1},
+        )
     trust_doc = db["courier_trust"].find_one({"courier_id": courier_id})
     score = trust_doc["score"] if trust_doc else 1.0
     if not loc:
@@ -107,7 +122,7 @@ async def get_verified_location(courier_id: str):
         "lat": loc["lat"],
         "lon": loc["lon"],
         "geo_trust_score": score,
-        "verified": True,
+        "verified": bool(loc.get("accepted", False)),
     }
 
 
@@ -126,13 +141,19 @@ async def get_verified_locations_batch(body: BatchRequest):
             sort=[("timestamp", -1)],
             projection={"lat": 1, "lon": 1},
         )
+        if not loc:
+            loc = db["locations"].find_one(
+                {"courier_id": cid},
+                sort=[("timestamp", -1)],
+                projection={"lat": 1, "lon": 1, "accepted": 1},
+            )
         trust_doc = db["courier_trust"].find_one({"courier_id": cid})
         score = trust_doc["score"] if trust_doc else 1.0
         result[cid] = {
             "lat": loc["lat"] if loc else None,
             "lon": loc["lon"] if loc else None,
             "geo_trust_score": score,
-            "verified": loc is not None,
+            "verified": bool(loc.get("accepted", False)) if loc else False,
         }
     return result
 

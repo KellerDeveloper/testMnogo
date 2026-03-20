@@ -14,7 +14,17 @@ enum APIError: Error, LocalizedError {
         switch self {
         case .invalidURL:
             return "Неверный адрес сервера. Проверьте настройки URL (Настройки или localhost:8001)."
-        case .httpError(let code, _):
+        case .httpError(let code, let data):
+            if let data {
+                let text = String(decoding: data, as: UTF8.self)
+                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // Тело ответа может содержать подсказку от FastAPI (например, валидацию Pydantic),
+                // показываем короткий фрагмент чтобы быстрее отладить формат payload.
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let preview = trimmed.count > 400 ? String(trimmed.prefix(400)) + "…" : trimmed
+                    return "Ошибка сервера: \(code). Ответ: \(preview)"
+                }
+            }
             if code == 404 { return "Курьер не найден" }
             return "Ошибка сервера: \(code)"
         case .decoding:
@@ -77,6 +87,39 @@ final class APIClient {
         req.httpMethod = "PATCH"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONEncoder().encode(["lat": lat, "lon": lon])
+        let (data, response) = try await session.data(for: req)
+        try checkResponse(response, data: data)
+    }
+
+    /// Пачка точек после офлайна / накопления в очереди.
+    func sendLocationBatch(courierId: String, points: [LocationQueueStore.PendingPoint]) async throws {
+        guard let url = URL(string: "\(courierBase)/couriers/\(courierId)/location/batch") else { throw APIError.invalidURL }
+        struct BatchPoint: Encodable {
+            let lat: Double
+            let lon: Double
+            let timestamp: String?
+            let source: String
+            let accuracy_m: Double?
+        }
+        struct Body: Encodable {
+            let points: [BatchPoint]
+        }
+        let enc = JSONEncoder()
+        let body = Body(
+            points: points.map {
+                BatchPoint(
+                    lat: $0.lat,
+                    lon: $0.lon,
+                    timestamp: $0.timestamp,
+                    source: $0.source,
+                    accuracy_m: $0.accuracyM
+                )
+            }
+        )
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try enc.encode(body)
         let (data, response) = try await session.data(for: req)
         try checkResponse(response, data: data)
     }
