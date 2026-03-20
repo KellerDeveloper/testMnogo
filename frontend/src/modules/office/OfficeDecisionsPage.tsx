@@ -61,6 +61,23 @@ const OfficeDecisionsPage: React.FC = () => {
     enabled: !!selectedDecisionId,
   });
 
+  // Helpers для читаемого и предсказуемого рендера модалки
+  const factors = Array.isArray(detailQuery.data?.factors) ? detailQuery.data?.factors : [];
+  const factorsComponentTotal = factors.reduce(
+    (sum, f) => sum + (f.normalized_value ?? 0) * (f.weight ?? 0),
+    0,
+  );
+
+  const scores =
+    detailQuery.data?.scores && typeof detailQuery.data.scores === 'object' && !Array.isArray(detailQuery.data.scores)
+      ? detailQuery.data.scores
+      : {};
+
+  const contextSnapshot =
+    detailQuery.data?.context_snapshot && typeof detailQuery.data.context_snapshot === 'object' && !Array.isArray(detailQuery.data.context_snapshot)
+      ? detailQuery.data.context_snapshot
+      : {};
+
   return (
     <Box>
       <Stack direction="row" justifyContent="space-between" alignItems="center" mb={3} spacing={2}>
@@ -188,12 +205,7 @@ const OfficeDecisionsPage: React.FC = () => {
                     </TableRow>
                   </TableHead>
                   <TableBody>
-                    {(() => {
-                      const factorsComponentTotal = (detailQuery.data.factors ?? []).reduce(
-                        (sum, f) => sum + (f.normalized_value ?? 0) * (f.weight ?? 0),
-                        0,
-                      );
-                      return (detailQuery.data.factors ?? []).map((f) => {
+                    {factors.map((f) => {
                       const factorLabels: Record<string, string> = {
                         delivery_time: 'Время до дедлайна',
                         fairness: 'Справедливость загрузки',
@@ -201,19 +213,28 @@ const OfficeDecisionsPage: React.FC = () => {
                         batch: 'Совместимость с активностью',
                         geo_trust: 'Доверие к гео',
                       };
-                      const factorLabel = factorLabels[f.name] ?? f.name;
 
+                      const factorLabel = factorLabels[f.name] ?? f.name;
                       const normalizedPercent = Math.round((f.normalized_value ?? 0) * 100);
                       const weightPercent = Math.round((f.weight ?? 0) * 100);
+
                       const contributionShare =
-                        factorsComponentTotal > 0 ? ((f.normalized_value ?? 0) * (f.weight ?? 0)) / factorsComponentTotal : 0;
+                        factorsComponentTotal > 0
+                          ? ((f.normalized_value ?? 0) * (f.weight ?? 0)) / factorsComponentTotal
+                          : 0;
                       const contributionPercent = Math.round(contributionShare * 100);
 
                       let rawHint: string | null = null;
                       if (f.raw_value !== null && f.raw_value !== undefined) {
                         if (typeof f.raw_value === 'number') {
-                          if (f.name === 'delivery_time') rawHint = `ETA: ${f.raw_value.toFixed(0)} мин`;
-                          else rawHint = `Значение: ${f.raw_value}`;
+                          // Единый формат для всех численных raw_value (без лишней точности/научной нотации).
+                          if (Number.isFinite(f.raw_value)) {
+                            const formatted = f.raw_value.toFixed(0);
+                            if (f.name === 'delivery_time') rawHint = `ETA: ${formatted} мин`;
+                            else rawHint = `Значение: ${formatted}`;
+                          } else {
+                            rawHint = `Значение: ${String(f.raw_value)}`;
+                          }
                         } else {
                           rawHint = `Значение: ${String(f.raw_value)}`;
                         }
@@ -249,8 +270,7 @@ const OfficeDecisionsPage: React.FC = () => {
                           </TableCell>
                         </TableRow>
                       );
-                      });
-                    })()}
+                    })}
                   </TableBody>
                 </Table>
               </Box>
@@ -267,7 +287,7 @@ const OfficeDecisionsPage: React.FC = () => {
                     </TableRow>
                   </TableHead>
                   <TableBody>
-                    {Object.entries(detailQuery.data.scores ?? {})
+                    {Object.entries(scores ?? {})
                       .map(([id, score]) => ({ id, score }))
                       .sort((a, b) => b.score - a.score)
                       .slice(0, 10)
@@ -290,13 +310,15 @@ const OfficeDecisionsPage: React.FC = () => {
                 </Table>
               </Box>
 
-              {Object.keys(detailQuery.data.context_snapshot ?? {}).length > 0 && (() => {
-                const ctx = detailQuery.data.context_snapshot ?? {};
-                const candidateCount = ctx.candidate_count;
-                const staffCount = ctx.staff_count;
-                const threePlCount = ctx['3pl_count'];
-                const orderId = ctx.order_id;
-                const kitchenId = ctx.kitchen_id;
+              {Object.keys(contextSnapshot ?? {}).length > 0 && (() => {
+                const ctx = contextSnapshot ?? {};
+                const candidateCount = (ctx as any).candidate_count;
+                const staffCount = (ctx as any).staff_count;
+                const threePlCount = (ctx as any)['3pl_count'];
+                const orderId = (ctx as any).order_id;
+                const kitchenId = (ctx as any).kitchen_id;
+                const hasOrderId = orderId !== undefined && orderId !== null;
+                const hasKitchenId = kitchenId !== undefined && kitchenId !== null;
 
                 return (
                   <Box mt={3}>
@@ -319,7 +341,7 @@ const OfficeDecisionsPage: React.FC = () => {
                           3PL: {String(threePlCount)}
                         </Typography>
                       )}
-                      {(orderId || kitchenId) && (
+                      {(hasOrderId || hasKitchenId) && (
                         <Typography variant="body2" color="text.secondary">
                           Order: {String(orderId ?? '-')} • Kitchen: {String(kitchenId ?? '-')}
                         </Typography>
