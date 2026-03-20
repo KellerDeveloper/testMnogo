@@ -193,7 +193,7 @@ const OfficeDecisionsPage: React.FC = () => {
                         (sum, f) => sum + (f.normalized_value ?? 0) * (f.weight ?? 0),
                         0,
                       );
-                      return detailQuery.data.factors.map((f) => {
+                      return (detailQuery.data.factors ?? []).map((f) => {
                       const factorLabels: Record<string, string> = {
                         delivery_time: 'Время до дедлайна',
                         fairness: 'Справедливость загрузки',
