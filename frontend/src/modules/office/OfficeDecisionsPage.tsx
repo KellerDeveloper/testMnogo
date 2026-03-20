@@ -161,24 +161,173 @@ const OfficeDecisionsPage: React.FC = () => {
           )}
           {detailQuery.data && (
             <Box>
-              <Typography variant="subtitle1" gutterBottom>
-                {detailQuery.data.reason_summary}
-              </Typography>
-              <Typography variant="subtitle2" gutterBottom>
-                Версия алгоритма: {detailQuery.data.algorithm_version}
-              </Typography>
+              <Stack spacing={1} mb={2}>
+                <Typography variant="h6">
+                  Исполнитель: {detailQuery.data.assigned_to} ({detailQuery.data.carrier_type})
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Источник: {detailQuery.data.assignment_source} • Winner score: {detailQuery.data.winner_score.toFixed(2)} • Версия: {detailQuery.data.algorithm_version}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  {detailQuery.data.reason_summary}
+                </Typography>
+              </Stack>
+
               <Box mt={2}>
-                <Typography variant="subtitle2">Scores</Typography>
-                <pre style={{ fontSize: 12, background: '#f5f5f5', padding: 8 }}>
-                  {JSON.stringify(detailQuery.data.scores, null, 2)}
-                </pre>
+                <Typography variant="subtitle2" gutterBottom>
+                  Факторы победителя
+                </Typography>
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Фактор</TableCell>
+                      <TableCell>Оценка</TableCell>
+                      <TableCell>Вес</TableCell>
+                      <TableCell>Вклад</TableCell>
+                      <TableCell>Пояснение</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {(() => {
+                      const factorsComponentTotal = (detailQuery.data.factors ?? []).reduce(
+                        (sum, f) => sum + (f.normalized_value ?? 0) * (f.weight ?? 0),
+                        0,
+                      );
+                      return detailQuery.data.factors.map((f) => {
+                      const factorLabels: Record<string, string> = {
+                        delivery_time: 'Время до дедлайна',
+                        fairness: 'Справедливость загрузки',
+                        distance: 'Близость к кухне',
+                        batch: 'Совместимость с активностью',
+                        geo_trust: 'Доверие к гео',
+                      };
+                      const factorLabel = factorLabels[f.name] ?? f.name;
+
+                      const normalizedPercent = Math.round((f.normalized_value ?? 0) * 100);
+                      const weightPercent = Math.round((f.weight ?? 0) * 100);
+                      const contributionShare =
+                        factorsComponentTotal > 0 ? ((f.normalized_value ?? 0) * (f.weight ?? 0)) / factorsComponentTotal : 0;
+                      const contributionPercent = Math.round(contributionShare * 100);
+
+                      let rawHint: string | null = null;
+                      if (f.raw_value !== null && f.raw_value !== undefined) {
+                        if (typeof f.raw_value === 'number') {
+                          if (f.name === 'delivery_time') rawHint = `ETA: ${f.raw_value.toFixed(0)} мин`;
+                          else rawHint = `Значение: ${f.raw_value}`;
+                        } else {
+                          rawHint = `Значение: ${String(f.raw_value)}`;
+                        }
+                      }
+
+                      return (
+                        <TableRow key={f.name}>
+                          <TableCell>
+                            <Stack spacing={0.25}>
+                              <Typography variant="body2" fontWeight={600}>
+                                {factorLabel}
+                              </Typography>
+                              {rawHint && (
+                                <Typography variant="caption" color="text.secondary">
+                                  {rawHint}
+                                </Typography>
+                              )}
+                            </Stack>
+                          </TableCell>
+                          <TableCell>
+                            <Typography variant="body2">{normalizedPercent}%</Typography>
+                          </TableCell>
+                          <TableCell>
+                            <Typography variant="body2">{weightPercent}%</Typography>
+                          </TableCell>
+                          <TableCell>
+                            <Typography variant="body2">{contributionPercent}%</Typography>
+                          </TableCell>
+                          <TableCell>
+                            <Typography variant="body2" color="text.secondary" style={{ whiteSpace: 'pre-wrap' }}>
+                              {f.explanation}
+                            </Typography>
+                          </TableCell>
+                        </TableRow>
+                      );
+                      });
+                    })()}
+                  </TableBody>
+                </Table>
               </Box>
-              <Box mt={2}>
-                <Typography variant="subtitle2">Факторы</Typography>
-                <pre style={{ fontSize: 12, background: '#f5f5f5', padding: 8 }}>
-                  {JSON.stringify(detailQuery.data.factors, null, 2)}
-                </pre>
+
+              <Box mt={3}>
+                <Typography variant="subtitle2" gutterBottom>
+                  Оценки кандидатов (top)
+                </Typography>
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Кандидат</TableCell>
+                      <TableCell align="right">Score</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {Object.entries(detailQuery.data.scores ?? {})
+                      .map(([id, score]) => ({ id, score }))
+                      .sort((a, b) => b.score - a.score)
+                      .slice(0, 10)
+                      .map((row) => (
+                        <TableRow key={row.id}>
+                          <TableCell>
+                            <Stack direction="row" spacing={1} alignItems="center">
+                              <Typography variant="body2" fontWeight={row.id === detailQuery.data.assigned_to ? 700 : 400}>
+                                {row.id}
+                              </Typography>
+                              {row.id === detailQuery.data.assigned_to && <Chip size="small" label="Победитель" color="primary" />}
+                            </Stack>
+                          </TableCell>
+                          <TableCell align="right">
+                            <Typography variant="body2">{row.score.toFixed(2)}</Typography>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                  </TableBody>
+                </Table>
               </Box>
+
+              {Object.keys(detailQuery.data.context_snapshot ?? {}).length > 0 && (() => {
+                const ctx = detailQuery.data.context_snapshot ?? {};
+                const candidateCount = ctx.candidate_count;
+                const staffCount = ctx.staff_count;
+                const threePlCount = ctx['3pl_count'];
+                const orderId = ctx.order_id;
+                const kitchenId = ctx.kitchen_id;
+
+                return (
+                  <Box mt={3}>
+                    <Typography variant="subtitle2" gutterBottom>
+                      Контекст
+                    </Typography>
+                    <Stack spacing={0.5}>
+                      {candidateCount !== undefined && (
+                        <Typography variant="body2" color="text.secondary">
+                          Кандидатов: {String(candidateCount)}
+                        </Typography>
+                      )}
+                      {staffCount !== undefined && (
+                        <Typography variant="body2" color="text.secondary">
+                          Staff: {String(staffCount)}
+                        </Typography>
+                      )}
+                      {threePlCount !== undefined && (
+                        <Typography variant="body2" color="text.secondary">
+                          3PL: {String(threePlCount)}
+                        </Typography>
+                      )}
+                      {(orderId || kitchenId) && (
+                        <Typography variant="body2" color="text.secondary">
+                          Order: {String(orderId ?? '-')} • Kitchen: {String(kitchenId ?? '-')}
+                        </Typography>
+                      )}
+                    </Stack>
+                  </Box>
+                );
+              })()}
             </Box>
           )}
         </DialogContent>
